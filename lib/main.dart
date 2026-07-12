@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:intl/intl.dart';
@@ -112,7 +113,12 @@ class Bill {
     int? remainingInstallments,
     this.autoDeduct = true,
     this.type = 'fixed',
-  }) : remainingInstallments = remainingInstallments ?? totalInstallments;
+    DateTime? startMonth,
+    List<String>? paidMonths,
+  }) : remainingInstallments = remainingInstallments ?? totalInstallments,
+       startMonth =
+           startMonth ?? DateTime(DateTime.now().year, DateTime.now().month),
+       paidMonths = paidMonths ?? [];
   final int id;
   String title;
   double amount;
@@ -123,7 +129,13 @@ class Bill {
   int remainingInstallments;
   bool autoDeduct;
   String type;
-  double get amountLeft => amount * remainingInstallments;
+  DateTime startMonth;
+  List<String> paidMonths;
+  double get amountLeft =>
+      type == 'recurring' ? amount : amount * remainingInstallments;
+  bool get isCompleted => type != 'recurring' && remainingInstallments <= 0;
+  bool get isPaidThisMonth =>
+      paidMonths.contains(DateFormat('yyyy-MM').format(DateTime.now()));
   Map<String, dynamic> toJson() => {
     'id': id,
     'title': title,
@@ -135,6 +147,8 @@ class Bill {
     'remainingInstallments': remainingInstallments,
     'autoDeduct': autoDeduct,
     'type': type,
+    'startMonth': startMonth.toIso8601String(),
+    'paidMonths': paidMonths,
   };
   factory Bill.fromJson(Map<String, dynamic> j) => Bill(
     id: j['id'],
@@ -148,6 +162,10 @@ class Bill {
         j['remainingInstallments'] ?? j['totalInstallments'] ?? 1,
     autoDeduct: j['autoDeduct'] ?? true,
     type: j['type'] ?? 'fixed',
+    startMonth: j['startMonth'] == null
+        ? null
+        : DateTime.parse(j['startMonth']),
+    paidMonths: (j['paidMonths'] as List?)?.cast<String>(),
   );
 }
 
@@ -194,8 +212,9 @@ class AppStore extends ChangeNotifier {
       )
       .fold(0, (a, e) => a + e.amount);
   double get billTotal => bills.fold(0, (a, b) => a + b.amount);
-  double get unpaidBills =>
-      bills.where((b) => !b.paid).fold(0, (a, b) => a + b.amount);
+  double get unpaidBills => bills
+      .where((b) => !b.isCompleted && !b.isPaidThisMonth)
+      .fold(0, (a, b) => a + b.amount);
   double get billsLeftTotal => bills.fold(0, (a, b) => a + b.amountLeft);
   double get totalSavings => savings.fold(0, (a, s) => a + s.saved);
   double get savingsTarget => savings.fold(0, (a, s) => a + s.target);
@@ -282,6 +301,15 @@ class AppStore extends ChangeNotifier {
     await save();
   }
 
+  Future<void> setBillOrder(List<int> orderedIds) async {
+    final byId = {for (final bill in bills) bill.id: bill};
+    bills
+      ..clear()
+      ..addAll(orderedIds.map((id) => byId[id]).whereType<Bill>());
+    notifyListeners();
+    await save();
+  }
+
   Future<void> changeInstallments(Bill value, int delta) async {
     value.remainingInstallments = (value.remainingInstallments + delta).clamp(
       0,
@@ -295,17 +323,46 @@ class AppStore extends ChangeNotifier {
   }
 
   Future<void> recordBillPayment(Bill value) async {
-    if (value.remainingInstallments <= 0) return;
+    if (value.isCompleted) return;
+    final month = DateFormat('yyyy-MM').format(DateTime.now());
+    if (value.paidMonths.contains(month)) return;
+    value.paidMonths.add(month);
     value.paid = true;
-    if (value.autoDeduct) value.remainingInstallments--;
+    if (value.type != 'recurring') value.remainingInstallments--;
+    notifyListeners();
+    await save();
+  }
+
+  Future<void> setBillMonthPaid(Bill value, DateTime month, bool isPaid) async {
+    final key = DateFormat('yyyy-MM').format(month);
+    if (isPaid && !value.paidMonths.contains(key)) {
+      value.paidMonths.add(key);
+    } else if (!isPaid) {
+      value.paidMonths.remove(key);
+    }
+    value.paidMonths.sort();
+    if (value.type != 'recurring') {
+      final scheduledMonths = List.generate(
+        value.totalInstallments,
+        (index) => DateFormat('yyyy-MM').format(
+          DateTime(value.startMonth.year, value.startMonth.month + index),
+        ),
+      );
+      final paidScheduled = value.paidMonths
+          .where(scheduledMonths.contains)
+          .length;
+      value.remainingInstallments = (value.totalInstallments - paidScheduled)
+          .clamp(0, value.totalInstallments);
+    }
+    value.paid = value.isPaidThisMonth;
     notifyListeners();
     await save();
   }
 
   Future<void> undoBillPayment(Bill value) async {
     value.paid = false;
-    if (value.autoDeduct &&
-        value.remainingInstallments < value.totalInstallments) {
+    if (value.paidMonths.isNotEmpty) value.paidMonths.removeLast();
+    if (value.remainingInstallments < value.totalInstallments) {
       value.remainingInstallments++;
     }
     notifyListeners();
@@ -439,6 +496,57 @@ class NotificationService {
 String money(double value) =>
     NumberFormat.currency(symbol: '₱', decimalDigits: 2).format(value);
 
+Future<bool> confirmDelete(BuildContext context, String itemName) async {
+  return await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.delete_outline),
+          title: Text('Delete $itemName?'),
+          content: const Text('This action cannot be undone.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(dialogContext).colorScheme.error,
+                foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+              ),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Delete'),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+}
+
+Future<void> payCurrentBillMonth(
+  BuildContext context,
+  AppStore store,
+  Bill bill,
+) async {
+  final label = DateFormat('MMMM yyyy').format(DateTime.now());
+  if (bill.isPaidThisMonth) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('${bill.title} is already paid for $label.')),
+    );
+    return;
+  }
+  if (bill.isCompleted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('${bill.title} is already completed.')),
+    );
+    return;
+  }
+  await store.recordBillPayment(bill);
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(
+    context,
+  ).showSnackBar(SnackBar(content: Text('${bill.title} was paid for $label.')));
+}
+
 class WelcomePage extends StatelessWidget {
   const WelcomePage({super.key, required this.store});
   final AppStore store;
@@ -543,21 +651,45 @@ class _HomePageState extends State<HomePage> {
       SettingsPage(store: widget.store),
     ];
     return Scaffold(
-      body: SafeArea(
-        child: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 320),
-          transitionBuilder: (child, animation) => FadeTransition(
-            opacity: animation,
-            child: SlideTransition(
-              position: Tween(
-                begin: const Offset(.03, 0),
-                end: Offset.zero,
-              ).animate(animation),
-              child: child,
+      body: Stack(
+        children: [
+          Positioned(
+            top: 80,
+            right: -75,
+            child: _BackgroundBubble(
+              color: Theme.of(context).brightness == Brightness.light
+                  ? const Color(0xFFFFCFC5)
+                  : const Color(0xFF3A1715),
+              size: 190,
             ),
           ),
-          child: KeyedSubtree(key: ValueKey(index), child: pages[index]),
-        ),
+          Positioned(
+            bottom: 90,
+            left: -95,
+            child: _BackgroundBubble(
+              color: Theme.of(context).brightness == Brightness.light
+                  ? const Color(0xFFDCD7FF)
+                  : const Color(0xFF1C183A),
+              size: 220,
+            ),
+          ),
+          SafeArea(
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 320),
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: SlideTransition(
+                  position: Tween(
+                    begin: const Offset(.03, 0),
+                    end: Offset.zero,
+                  ).animate(animation),
+                  child: child,
+                ),
+              ),
+              child: KeyedSubtree(key: ValueKey(index), child: pages[index]),
+            ),
+          ),
+        ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
@@ -585,25 +717,35 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      floatingActionButton: index == 1 || index == 2 || index == 3
+      floatingActionButton: index == 1 || index == 3
           ? FloatingActionButton.extended(
               onPressed: () => index == 1
                   ? showExpenseSheet(context, widget.store)
-                  : index == 2
-                  ? showBillSheet(context, widget.store)
                   : showSavingSheet(context, widget.store),
               icon: const Icon(Icons.add),
-              label: Text(
-                index == 1
-                    ? 'Expense'
-                    : index == 2
-                    ? 'Bill'
-                    : 'Goal',
-              ),
+              label: Text(index == 1 ? 'Expense' : 'Goal'),
             )
           : null,
     );
   }
+}
+
+class _BackgroundBubble extends StatelessWidget {
+  const _BackgroundBubble({required this.color, required this.size});
+  final Color color;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+    child: Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: .34),
+        shape: BoxShape.circle,
+      ),
+    ),
+  );
 }
 
 class PageHeader extends StatelessWidget {
@@ -667,8 +809,9 @@ class Dashboard extends StatelessWidget {
     final progress = store.savingsTarget == 0
         ? 0.0
         : (store.totalSavings / store.savingsTarget).clamp(0.0, 1.0);
-    final upcoming = [...store.bills.where((b) => !b.paid)]
-      ..sort((a, b) => a.dueDay.compareTo(b.dueDay));
+    final upcoming = [
+      ...store.bills.where((b) => !b.isCompleted && !b.isPaidThisMonth),
+    ]..sort((a, b) => a.dueDay.compareTo(b.dueDay));
     return ListView(
       padding: const EdgeInsets.only(bottom: 24),
       children: [
@@ -684,10 +827,12 @@ class Dashboard extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: GlassPanel(
-            gradient: const LinearGradient(
+            gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
-              colors: [Color(0xFF176B67), Color(0xFF2A9D8F)],
+              colors: Theme.of(context).brightness == Brightness.dark
+                  ? const [Color(0xFF031B19), Color(0xFF0B3A35)]
+                  : const [Color(0xFF176B67), Color(0xFF2A9D8F)],
             ),
             child: Padding(
               padding: const EdgeInsets.all(24),
@@ -697,9 +842,7 @@ class Dashboard extends StatelessWidget {
                   Text(
                     'Total savings',
                     style: TextStyle(
-                      color: Theme.of(
-                        context,
-                      ).colorScheme.onPrimary.withValues(alpha: .8),
+                      color: Colors.white.withValues(alpha: .82),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -708,8 +851,8 @@ class Dashboard extends StatelessWidget {
                     duration: const Duration(milliseconds: 650),
                     builder: (_, value, _) => Text(
                       money(value),
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.onPrimary,
+                      style: const TextStyle(
+                        color: Colors.white,
                         fontSize: 34,
                         fontWeight: FontWeight.w800,
                       ),
@@ -729,9 +872,7 @@ class Dashboard extends StatelessWidget {
                         ? 'Create a goal to start your trail'
                         : '${money(store.totalSavings)} of ${money(store.savingsTarget)} saved',
                     style: TextStyle(
-                      color: Theme.of(
-                        context,
-                      ).colorScheme.onPrimary.withValues(alpha: .8),
+                      color: Colors.white.withValues(alpha: .82),
                     ),
                   ),
                 ],
@@ -777,7 +918,7 @@ class Dashboard extends StatelessWidget {
               .map(
                 (b) => Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: BillTile(bill: b, store: store),
+                  child: BillTile(bill: b, store: store, showPayAction: true),
                 ),
               ),
         const SectionTitle('Recent expenses', ''),
@@ -815,12 +956,16 @@ class GlassPanel extends StatelessWidget {
         decoration: BoxDecoration(
           gradient: gradient,
           color: gradient == null
-              ? Theme.of(
-                  context,
-                ).colorScheme.surfaceContainerHighest.withValues(alpha: .66)
+              ? Theme.of(context).brightness == Brightness.light
+                    ? Colors.white
+                    : const Color(0xFF0B0B0B)
               : null,
           borderRadius: BorderRadius.circular(26),
-          border: Border.all(color: Colors.white.withValues(alpha: .22)),
+          border: Border.all(
+            color: Theme.of(context).brightness == Brightness.light
+                ? teal.withValues(alpha: .08)
+                : Colors.white.withValues(alpha: .12),
+          ),
           boxShadow: [
             BoxShadow(
               color: teal.withValues(alpha: .16),
@@ -882,6 +1027,15 @@ class SectionTitle extends StatelessWidget {
     padding: const EdgeInsets.fromLTRB(22, 26, 22, 10),
     child: Row(
       children: [
+        Container(
+          width: 8,
+          height: 22,
+          decoration: BoxDecoration(
+            color: title == 'Completed' ? const Color(0xFF8B7CF6) : teal,
+            borderRadius: BorderRadius.circular(8),
+          ),
+        ),
+        const SizedBox(width: 9),
         Expanded(
           child: Text(
             title,
@@ -966,6 +1120,7 @@ class ExpenseTile extends StatelessWidget {
       ),
       child: const Icon(Icons.delete_outline, color: Colors.white),
     ),
+    confirmDismiss: (_) => confirmDelete(context, 'expense'),
     onDismissed: (_) => store.removeExpense(expense),
     child: Card(
       margin: const EdgeInsets.symmetric(horizontal: 0, vertical: 5),
@@ -1004,42 +1159,196 @@ class ExpenseTile extends StatelessWidget {
   );
 }
 
-class BillsPage extends StatelessWidget {
+class BillsPage extends StatefulWidget {
   const BillsPage({super.key, required this.store});
   final AppStore store;
+
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      PageHeader(
-        'Bills & installments',
-        '${money(store.billsLeftTotal)} left · drag to organize',
-      ),
-      Expanded(
-        child: store.bills.isEmpty
-            ? const Center(
-                child: EmptyState(
-                  icon: Icons.calendar_month_outlined,
-                  title: 'No monthly bills',
-                  body: 'Add rent, utilities, subscriptions, and more.',
+  State<BillsPage> createState() => _BillsPageState();
+}
+
+class _BillsPageState extends State<BillsPage> {
+  int selectedTab = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final recurring = widget.store.bills
+        .where((bill) => bill.type == 'recurring')
+        .toList();
+    final installments = widget.store.bills
+        .where((bill) => bill.type != 'recurring')
+        .toList();
+    return Stack(
+      children: [
+        Column(
+          children: [
+            PageHeader(
+              'Payments',
+              selectedTab == 0
+                  ? '${recurring.length} recurring bill${recurring.length == 1 ? '' : 's'}'
+                  : '${money(installments.fold<double>(0, (sum, bill) => sum + bill.amountLeft))} installment balance',
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).brightness == Brightness.light
+                      ? const Color(0xFFE9E7FF)
+                      : const Color(0xFF171522),
+                  borderRadius: BorderRadius.circular(16),
                 ),
-              )
-            : ReorderableListView.builder(
-                key: ValueKey(
-                  'bills-${store.bills.length}-${store.billsLeftTotal}',
-                ),
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 90),
-                buildDefaultDragHandles: false,
-                itemCount: store.bills.length,
-                onReorderItem: store.reorderBills,
-                itemBuilder: (_, i) => BillTile(
-                  key: ValueKey(store.bills[i].id),
-                  bill: store.bills[i],
-                  store: store,
-                  index: i,
+                child: SegmentedButton<int>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(
+                      value: 0,
+                      icon: Icon(Icons.autorenew_rounded),
+                      label: Text('Bills'),
+                    ),
+                    ButtonSegment(
+                      value: 1,
+                      icon: Icon(Icons.payments_outlined),
+                      label: Text('Installments'),
+                    ),
+                  ],
+                  selected: {selectedTab},
+                  onSelectionChanged: (value) =>
+                      setState(() => selectedTab = value.first),
                 ),
               ),
-      ),
-    ],
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: IndexedStack(
+                index: selectedTab,
+                children: [
+                  _BillsTypeTab(
+                    bills: recurring,
+                    store: widget.store,
+                    emptyTitle: 'No recurring bills',
+                    emptyBody:
+                        'Add electricity, rent, Spotify, or any monthly bill.',
+                  ),
+                  _BillsTypeTab(
+                    bills: installments,
+                    store: widget.store,
+                    emptyTitle: 'No installment plans',
+                    emptyBody:
+                        'Add a phone, appliance, loan, or other finite plan.',
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        Positioned(
+          right: 20,
+          bottom: 18,
+          child: FloatingActionButton.extended(
+            heroTag: 'add-payment',
+            onPressed: () => showBillSheet(
+              context,
+              widget.store,
+              initialType: selectedTab == 0 ? 'recurring' : 'fixed',
+            ),
+            icon: const Icon(Icons.add),
+            label: Text(selectedTab == 0 ? 'Add bill' : 'Add installment'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _BillsTypeTab extends StatelessWidget {
+  const _BillsTypeTab({
+    required this.bills,
+    required this.store,
+    required this.emptyTitle,
+    required this.emptyBody,
+  });
+  final List<Bill> bills;
+  final AppStore store;
+  final String emptyTitle;
+  final String emptyBody;
+
+  void _reorder(List<Bill> group, int oldIndex, int newIndex) {
+    final reordered = [...group];
+    final moved = reordered.removeAt(oldIndex);
+    reordered.insert(newIndex, moved);
+    final idsInGroup = group.map((bill) => bill.id).toSet();
+    var replacementIndex = 0;
+    final orderedIds = store.bills.map((bill) {
+      if (!idsInGroup.contains(bill.id)) return bill.id;
+      return reordered[replacementIndex++].id;
+    }).toList();
+    store.setBillOrder(orderedIds);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (bills.isEmpty) {
+      return Center(
+        child: EmptyState(
+          icon: Icons.calendar_month_outlined,
+          title: emptyTitle,
+          body: emptyBody,
+        ),
+      );
+    }
+    final ongoing = bills.where((bill) => !bill.isCompleted).toList();
+    final completed = bills.where((bill) => bill.isCompleted).toList();
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
+      children: [
+        if (ongoing.isNotEmpty) ...[
+          const SectionTitle('Ongoing', ''),
+          _BillGroup(
+            bills: ongoing,
+            store: store,
+            onReorder: (oldIndex, newIndex) =>
+                _reorder(ongoing, oldIndex, newIndex),
+          ),
+        ],
+        if (completed.isNotEmpty) ...[
+          const SectionTitle('Completed', ''),
+          _BillGroup(
+            bills: completed,
+            store: store,
+            onReorder: (oldIndex, newIndex) =>
+                _reorder(completed, oldIndex, newIndex),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _BillGroup extends StatelessWidget {
+  const _BillGroup({
+    required this.bills,
+    required this.store,
+    required this.onReorder,
+  });
+  final List<Bill> bills;
+  final AppStore store;
+  final ReorderCallback onReorder;
+
+  @override
+  Widget build(BuildContext context) => ReorderableListView.builder(
+    shrinkWrap: true,
+    physics: const NeverScrollableScrollPhysics(),
+    buildDefaultDragHandles: false,
+    itemCount: bills.length,
+    onReorderItem: onReorder,
+    itemBuilder: (_, index) => BillTile(
+      key: ValueKey(bills[index].id),
+      bill: bills[index],
+      store: store,
+      index: index,
+      showEditAction: true,
+    ),
   );
 }
 
@@ -1049,10 +1358,14 @@ class BillTile extends StatelessWidget {
     required this.bill,
     required this.store,
     this.index,
+    this.showPayAction = false,
+    this.showEditAction = false,
   });
   final Bill bill;
   final AppStore store;
   final int? index;
+  final bool showPayAction;
+  final bool showEditAction;
   @override
   Widget build(BuildContext context) => Dismissible(
     key: ValueKey(bill.id),
@@ -1067,23 +1380,32 @@ class BillTile extends StatelessWidget {
       ),
       child: const Icon(Icons.delete_outline, color: Colors.white),
     ),
+    confirmDismiss: (_) => confirmDelete(context, 'bill'),
     onDismissed: (_) => store.removeBill(bill),
     child: Card(
       margin: const EdgeInsets.symmetric(horizontal: 0, vertical: 5),
       child: InkWell(
         borderRadius: BorderRadius.circular(22),
-        onTap: () => showBillSheet(context, store, bill: bill),
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => BillDetailsPage(store: store, bill: bill),
+          ),
+        ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
           child: Row(
             children: [
               CircleAvatar(
-                backgroundColor: teal.withValues(alpha: .14),
+                backgroundColor: bill.type == 'recurring'
+                    ? teal.withValues(alpha: .14)
+                    : const Color(0xFFFF8D7A).withValues(alpha: .18),
                 child: Icon(
                   bill.type == 'recurring'
                       ? Icons.autorenew_rounded
                       : Icons.payments_outlined,
-                  color: teal,
+                  color: bill.type == 'recurring'
+                      ? teal
+                      : const Color(0xFFE85D4A),
                 ),
               ),
               const SizedBox(width: 12),
@@ -1098,12 +1420,18 @@ class BillTile extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text(
                       bill.type == 'fixed'
-                          ? 'Fixed bill · due day ${bill.dueDay}'
-                          : 'Recurring · ${bill.remainingInstallments} months left · due day ${bill.dueDay}',
+                          ? '${bill.remainingInstallments} of ${bill.totalInstallments} installments left · due day ${bill.dueDay}'
+                          : 'Monthly bill · due day ${bill.dueDay}',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
-                    if (bill.type == 'recurring') const SizedBox(height: 7),
-                    if (bill.type == 'recurring')
+                    Text(
+                      'Started ${DateFormat('MMM yyyy').format(bill.startMonth)} · ${bill.paidMonths.length} payment${bill.paidMonths.length == 1 ? '' : 's'} recorded',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    if (bill.type != 'recurring') const SizedBox(height: 7),
+                    if (bill.type != 'recurring')
                       ClipRRect(
                         borderRadius: BorderRadius.circular(10),
                         child: LinearProgressIndicator(
@@ -1127,10 +1455,10 @@ class BillTile extends StatelessWidget {
                     style: const TextStyle(fontWeight: FontWeight.w800),
                   ),
                   Text(
-                    bill.type == 'fixed' ? 'bill amount' : 'per installment',
+                    bill.type == 'fixed' ? 'per installment' : 'every month',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
-                  if (bill.type == 'recurring') ...[
+                  if (bill.type != 'recurring') ...[
                     const SizedBox(height: 4),
                     Text(
                       '${money(bill.amountLeft)} left',
@@ -1138,6 +1466,32 @@ class BillTile extends StatelessWidget {
                         color: teal,
                         fontWeight: FontWeight.w700,
                       ),
+                    ),
+                  ],
+                  if (showPayAction) ...[
+                    const SizedBox(height: 6),
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                      ),
+                      onPressed: () =>
+                          payCurrentBillMonth(context, store, bill),
+                      icon: const Icon(Icons.check_rounded, size: 17),
+                      label: Text(bill.isPaidThisMonth ? 'Paid' : 'Pay'),
+                    ),
+                  ],
+                  if (showEditAction) ...[
+                    const SizedBox(height: 6),
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 9),
+                      ),
+                      onPressed: () =>
+                          showBillSheet(context, store, bill: bill),
+                      icon: const Icon(Icons.edit_outlined, size: 16),
+                      label: const Text('Edit'),
                     ),
                   ],
                   if (index != null)
@@ -1155,6 +1509,126 @@ class BillTile extends StatelessWidget {
         ),
       ),
     ),
+  );
+}
+
+class BillDetailsPage extends StatelessWidget {
+  const BillDetailsPage({super.key, required this.store, required this.bill});
+  final AppStore store;
+  final Bill bill;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: store,
+    builder: (context, _) {
+      final now = DateTime.now();
+      final monthsSinceStart =
+          (now.year - bill.startMonth.year) * 12 +
+          now.month -
+          bill.startMonth.month;
+      final scheduleLength = bill.type == 'recurring'
+          ? (monthsSinceStart + 13 > 12 ? monthsSinceStart + 13 : 12)
+          : bill.totalInstallments;
+      final months = List.generate(
+        scheduleLength,
+        (index) =>
+            DateTime(bill.startMonth.year, bill.startMonth.month + index),
+      );
+      return Scaffold(
+        appBar: AppBar(title: Text(bill.title)),
+        body: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Theme.of(context).brightness == Brightness.light
+                    ? const Color(0xFFE8F5F2)
+                    : const Color(0xFF082A27),
+                borderRadius: BorderRadius.circular(22),
+              ),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 25,
+                    backgroundColor: teal,
+                    foregroundColor: Colors.white,
+                    child: Icon(
+                      bill.type == 'fixed'
+                          ? Icons.payments_outlined
+                          : Icons.autorenew_rounded,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          money(bill.amount),
+                          style: Theme.of(context).textTheme.headlineSmall
+                              ?.copyWith(fontWeight: FontWeight.w900),
+                        ),
+                        Text(
+                          bill.type == 'recurring'
+                              ? '${bill.paidMonths.length} months paid · renews monthly'
+                              : '${bill.paidMonths.length} paid · ${bill.remainingInstallments} remaining',
+                        ),
+                      ],
+                    ),
+                  ),
+                  Chip(
+                    label: Text(
+                      bill.type == 'recurring'
+                          ? 'Recurring'
+                          : bill.isCompleted
+                          ? 'Completed'
+                          : 'Ongoing',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Payment schedule',
+              style: Theme.of(
+                context,
+              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 10),
+            ...months.map((month) {
+              final key = DateFormat('yyyy-MM').format(month);
+              final isPaid = bill.paidMonths.contains(key);
+              final dueDate = DateTime(month.year, month.month, bill.dueDay);
+              return Card(
+                margin: const EdgeInsets.only(bottom: 10),
+                child: CheckboxListTile(
+                  value: isPaid,
+                  onChanged: (value) =>
+                      store.setBillMonthPaid(bill, month, value ?? false),
+                  secondary: CircleAvatar(
+                    backgroundColor: isPaid
+                        ? teal.withValues(alpha: .16)
+                        : Theme.of(context).colorScheme.surfaceContainerHighest,
+                    child: Text(DateFormat('MMM').format(month)),
+                  ),
+                  title: Text(
+                    DateFormat('MMMM yyyy').format(month),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: Text(
+                    isPaid
+                        ? 'Paid'
+                        : 'Due ${DateFormat('MMMM d, yyyy').format(dueDate)}',
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+      );
+    },
   );
 }
 
@@ -1207,6 +1681,43 @@ class SavingsPage extends StatelessWidget {
                                     ),
                                   ),
                                   Text('${(goal.progress * 100).round()}%'),
+                                  PopupMenuButton<String>(
+                                    tooltip: 'Savings actions',
+                                    onSelected: (action) async {
+                                      if (action == 'edit') {
+                                        showSavingSheet(
+                                          context,
+                                          store,
+                                          goal: goal,
+                                        );
+                                      } else if (action == 'delete') {
+                                        if (await confirmDelete(
+                                          context,
+                                          'savings goal',
+                                        )) {
+                                          store.removeSaving(goal);
+                                        }
+                                      }
+                                    },
+                                    itemBuilder: (_) => const [
+                                      PopupMenuItem(
+                                        value: 'edit',
+                                        child: ListTile(
+                                          contentPadding: EdgeInsets.zero,
+                                          leading: Icon(Icons.edit_outlined),
+                                          title: Text('Edit goal'),
+                                        ),
+                                      ),
+                                      PopupMenuItem(
+                                        value: 'delete',
+                                        child: ListTile(
+                                          contentPadding: EdgeInsets.zero,
+                                          leading: Icon(Icons.delete_outline),
+                                          title: Text('Delete goal'),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ],
                               ),
                               const SizedBox(height: 18),
@@ -1223,6 +1734,19 @@ class SavingsPage extends StatelessWidget {
                               const SizedBox(height: 10),
                               Text(
                                 '${money(goal.saved)} saved · ${money(goal.remaining)} to go',
+                              ),
+                              const SizedBox(height: 14),
+                              Align(
+                                alignment: Alignment.centerLeft,
+                                child: FilledButton.icon(
+                                  onPressed: () => showAddSavingsDialog(
+                                    context,
+                                    store,
+                                    goal,
+                                  ),
+                                  icon: const Icon(Icons.add_rounded, size: 18),
+                                  label: const Text('Add savings'),
+                                ),
                               ),
                             ],
                           ),
@@ -1244,22 +1768,6 @@ class SettingsPage extends StatelessWidget {
   Widget build(BuildContext context) => ListView(
     children: [
       const PageHeader('More', 'Make MoneyTrail feel like yours'),
-      const SectionTitle('Monthly plan', ''),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Card(
-          child: ListTile(
-            contentPadding: const EdgeInsets.all(16),
-            leading: const CircleAvatar(
-              child: Icon(Icons.account_balance_wallet_outlined),
-            ),
-            title: const Text('Monthly budget'),
-            subtitle: Text(money(store.monthlyBudget)),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => showBudgetDialog(context, store),
-          ),
-        ),
-      ),
       const SectionTitle('Appearance', ''),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -1299,6 +1807,26 @@ class SettingsPage extends StatelessWidget {
             title: Text('Offline only'),
             subtitle: Text('Your financial data never leaves this device.'),
           ),
+        ),
+      ),
+      const SizedBox(height: 36),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 32),
+        child: Row(
+          children: [
+            Icon(
+              Icons.route_rounded,
+              size: 24,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(width: 10),
+            Text(
+              'Victor Leandro R. Dela Cruz',
+              style: Theme.of(
+                context,
+              ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+            ),
+          ],
         ),
       ),
     ],
@@ -1474,6 +2002,7 @@ Future<void> showBillSheet(
   BuildContext context,
   AppStore store, {
   Bill? bill,
+  String? initialType,
 }) async {
   final title = TextEditingController(text: bill?.title ?? '');
   final amount = TextEditingController(
@@ -1483,8 +2012,11 @@ Future<void> showBillSheet(
   bool reminder = bill?.reminder ?? true;
   int installments = bill?.totalInstallments ?? 1;
   int remaining = bill?.remainingInstallments ?? 1;
-  bool autoDeduct = bill?.autoDeduct ?? true;
-  String billType = bill?.type ?? 'recurring';
+  final installmentsInput = TextEditingController(text: '$installments');
+  final remainingInput = TextEditingController(text: '$remaining');
+  String billType = bill?.type ?? initialType ?? 'recurring';
+  DateTime startMonth =
+      bill?.startMonth ?? DateTime(DateTime.now().year, DateTime.now().month);
   await showModalBottomSheet(
     context: context,
     isScrollControlled: true,
@@ -1502,7 +2034,11 @@ Future<void> showBillSheet(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                bill == null ? 'Add a bill' : 'Update bill',
+                bill == null
+                    ? billType == 'recurring'
+                          ? 'Add recurring bill'
+                          : 'Add installment plan'
+                    : 'Update details',
                 style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
               ),
               const SizedBox(height: 20),
@@ -1520,8 +2056,8 @@ Future<void> showBillSheet(
                 ),
                 decoration: InputDecoration(
                   labelText: billType == 'fixed'
-                      ? 'Bill amount'
-                      : 'Amount per month',
+                      ? 'Amount per installment'
+                      : 'Monthly amount',
                   prefixText: '₱ ',
                 ),
               ),
@@ -1531,21 +2067,22 @@ Future<void> showBillSheet(
                   ButtonSegment(
                     value: 'recurring',
                     icon: Icon(Icons.autorenew_rounded),
-                    label: Text('Recurring'),
+                    label: Text('Bill'),
                   ),
                   ButtonSegment(
                     value: 'fixed',
                     icon: Icon(Icons.payments_outlined),
-                    label: Text('Fixed'),
+                    label: Text('Installment'),
                   ),
                 ],
                 selected: {billType},
                 onSelectionChanged: (value) => setModalState(() {
                   billType = value.first;
-                  if (billType == 'fixed') {
+                  if (billType == 'recurring') {
                     installments = 1;
                     remaining = 1;
-                    autoDeduct = true;
+                    installmentsInput.text = '1';
+                    remainingInput.text = '1';
                   }
                 }),
               ),
@@ -1565,65 +2102,71 @@ Future<void> showBillSheet(
                 onChanged: (v) => setModalState(() => day = v!),
               ),
               const SizedBox(height: 12),
-              if (billType == 'recurring')
+              InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () async {
+                  final selected = await showDatePicker(
+                    context: context,
+                    initialDate: startMonth,
+                    firstDate: DateTime(2000),
+                    lastDate: DateTime(2100),
+                    helpText: 'Select starting month',
+                  );
+                  if (selected != null) {
+                    setModalState(() {
+                      startMonth = DateTime(selected.year, selected.month);
+                    });
+                  }
+                },
+                child: InputDecorator(
+                  decoration: const InputDecoration(
+                    labelText: 'Starting month',
+                    prefixIcon: Icon(Icons.calendar_month_outlined),
+                  ),
+                  child: Text(DateFormat('MMMM yyyy').format(startMonth)),
+                ),
+              ),
+              const SizedBox(height: 12),
+              if (billType == 'fixed')
                 Row(
                   children: [
                     Expanded(
-                      child: DropdownButtonFormField<int>(
-                        initialValue: installments,
+                      child: TextField(
+                        controller: installmentsInput,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
                         decoration: const InputDecoration(
                           labelText: 'Total installments',
                         ),
-                        items: List.generate(
-                          60,
-                          (i) => DropdownMenuItem(
-                            value: i + 1,
-                            child: Text('${i + 1}'),
-                          ),
-                        ),
-                        onChanged: (v) => setModalState(() {
-                          installments = v!;
-                          if (bill == null || remaining > installments) {
+                        onChanged: (text) {
+                          final value = int.tryParse(text);
+                          if (value == null || value < 1) return;
+                          installments = value;
+                          if (remaining > installments) {
                             remaining = installments;
+                            remainingInput.text = '$remaining';
                           }
-                        }),
+                        },
                       ),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: InputDecorator(
+                      child: TextField(
+                        controller: remainingInput,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
                         decoration: const InputDecoration(
                           labelText: 'Months left',
                         ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            IconButton(
-                              tooltip: 'Remove one month',
-                              onPressed: remaining > 0
-                                  ? () => setModalState(() => remaining--)
-                                  : null,
-                              icon: const Icon(Icons.remove_circle_outline),
-                            ),
-                            Text(
-                              '$remaining',
-                              style: const TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Add one month',
-                              onPressed: () => setModalState(() {
-                                remaining++;
-                                if (remaining > installments) {
-                                  installments = remaining;
-                                }
-                              }),
-                              icon: const Icon(Icons.add_circle_outline),
-                            ),
-                          ],
-                        ),
+                        onChanged: (text) {
+                          final value = int.tryParse(text);
+                          if (value == null || value < 0) return;
+                          remaining = value;
+                        },
                       ),
                     ),
                   ],
@@ -1634,13 +2177,41 @@ Future<void> showBillSheet(
                 value: reminder,
                 onChanged: (v) => setModalState(() => reminder = v),
               ),
+              if (bill != null && bill.paidMonths.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Paid months',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: bill.paidMonths.map((month) {
+                    final date = DateTime.parse('$month-01');
+                    return Chip(
+                      label: Text(DateFormat('MMM yyyy').format(date)),
+                    );
+                  }).toList(),
+                ),
+              ],
               const SizedBox(height: 10),
               FilledButton(
                 onPressed: () {
                   final value = double.tryParse(amount.text);
+                  if (billType == 'fixed') {
+                    installments = int.tryParse(installmentsInput.text) ?? 0;
+                    remaining = int.tryParse(remainingInput.text) ?? -1;
+                  }
                   if (title.text.trim().isEmpty ||
                       value == null ||
-                      value <= 0) {
+                      value <= 0 ||
+                      (billType == 'fixed' &&
+                          (installments < 1 ||
+                              remaining < 0 ||
+                              remaining > installments))) {
                     return;
                   }
                   if (bill == null) {
@@ -1653,14 +2224,15 @@ Future<void> showBillSheet(
                         amount: value,
                         dueDay: day,
                         reminder: reminder,
-                        totalInstallments: billType == 'fixed'
+                        totalInstallments: billType == 'recurring'
                             ? 1
                             : installments,
-                        remainingInstallments: billType == 'fixed'
+                        remainingInstallments: billType == 'recurring'
                             ? 1
                             : remaining,
-                        autoDeduct: billType == 'fixed' ? true : autoDeduct,
+                        autoDeduct: true,
                         type: billType,
+                        startMonth: startMonth,
                       ),
                     );
                   } else {
@@ -1669,14 +2241,15 @@ Future<void> showBillSheet(
                       ..amount = value
                       ..dueDay = day
                       ..reminder = reminder
-                      ..totalInstallments = billType == 'fixed'
+                      ..totalInstallments = billType == 'recurring'
                           ? 1
                           : installments
-                      ..remainingInstallments = billType == 'fixed'
-                          ? bill.remainingInstallments.clamp(0, 1)
+                      ..remainingInstallments = billType == 'recurring'
+                          ? 1
                           : remaining
-                      ..autoDeduct = billType == 'fixed' ? true : autoDeduct
-                      ..type = billType;
+                      ..autoDeduct = true
+                      ..type = billType
+                      ..startMonth = startMonth;
                     store.updateBill(bill);
                   }
                   Navigator.pop(context);
@@ -1739,23 +2312,31 @@ Future<void> showSavingSheet(
               prefixText: '₱ ',
             ),
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: saved,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(
-              labelText: 'Amount saved',
-              prefixText: '₱ ',
+          if (goal != null) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: saved,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(
+                labelText: 'Total saved',
+                prefixText: '₱ ',
+                helperText: 'Manually correct the accumulated total.',
+              ),
             ),
-          ),
+          ],
           const SizedBox(height: 20),
           FilledButton(
             onPressed: () {
               final targetValue = double.tryParse(target.text);
-              final savedValue = double.tryParse(saved.text) ?? 0;
+              final savedValue = goal == null
+                  ? 0.0
+                  : double.tryParse(saved.text);
               if (title.text.trim().isEmpty ||
                   targetValue == null ||
                   targetValue <= 0 ||
+                  savedValue == null ||
                   savedValue < 0) {
                 return;
               }
@@ -1765,7 +2346,7 @@ Future<void> showSavingSheet(
                     id: DateTime.now().millisecondsSinceEpoch,
                     title: title.text.trim(),
                     target: targetValue,
-                    saved: savedValue,
+                    saved: 0,
                   ),
                 );
               } else {
@@ -1784,15 +2365,57 @@ Future<void> showSavingSheet(
           ),
           if (goal != null)
             TextButton.icon(
-              onPressed: () {
-                store.removeSaving(goal);
-                Navigator.pop(context);
+              onPressed: () async {
+                if (await confirmDelete(context, 'savings goal')) {
+                  store.removeSaving(goal);
+                  if (context.mounted) Navigator.pop(context);
+                }
               },
               icon: const Icon(Icons.delete_outline),
               label: const Text('Delete goal'),
             ),
         ],
       ),
+    ),
+  );
+}
+
+Future<void> showAddSavingsDialog(
+  BuildContext context,
+  AppStore store,
+  SavingGoal goal,
+) async {
+  final amount = TextEditingController();
+  await showDialog(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text('Add to ${goal.title}'),
+      content: TextField(
+        controller: amount,
+        autofocus: true,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: InputDecoration(
+          labelText: 'Amount to add',
+          prefixText: '₱ ',
+          helperText: 'Currently saved: ${money(goal.saved)}',
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final value = double.tryParse(amount.text);
+            if (value == null || value <= 0) return;
+            goal.saved += value;
+            store.updateSaving(goal);
+            Navigator.pop(dialogContext);
+          },
+          child: const Text('Add savings'),
+        ),
+      ],
     ),
   );
 }

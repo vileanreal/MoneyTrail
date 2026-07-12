@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:money_trail/main.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   test('expense and bill totals are calculated', () {
@@ -32,6 +33,56 @@ void main() {
     expect(store.totalSavings, 2500);
     expect(store.remaining, 5750);
   });
+
+  test('bill payments track months and cannot duplicate a month', () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = AppStore();
+    final bill = Bill(
+      id: 4,
+      title: 'Phone',
+      amount: 1000,
+      dueDay: 15,
+      totalInstallments: 3,
+      startMonth: DateTime(DateTime.now().year, DateTime.now().month),
+    );
+    store.bills.add(bill);
+
+    await store.recordBillPayment(bill);
+    await store.recordBillPayment(bill);
+
+    expect(bill.paidMonths, hasLength(1));
+    expect(bill.remainingInstallments, 2);
+    expect(bill.isPaidThisMonth, isTrue);
+  });
+
+  test(
+    'recurring bills accept payments across months without completing',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = AppStore();
+      final now = DateTime.now();
+      final bill = Bill(
+        id: 5,
+        title: 'Electricity',
+        amount: 1800,
+        dueDay: 20,
+        type: 'recurring',
+        startMonth: DateTime(now.year, now.month),
+      );
+      store.bills.add(bill);
+
+      await store.setBillMonthPaid(bill, now, true);
+      await store.setBillMonthPaid(
+        bill,
+        DateTime(now.year, now.month + 1),
+        true,
+      );
+
+      expect(bill.paidMonths, hasLength(2));
+      expect(bill.isCompleted, isFalse);
+      expect(bill.remainingInstallments, 1);
+    },
+  );
 
   testWidgets('dashboard supports light and dark themes', (tester) async {
     final store = AppStore()

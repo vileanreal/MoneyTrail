@@ -7,7 +7,7 @@ Flutter. It supports Android, iOS, and web. The product tracks three areas:
 
 - savings goals and contributions;
 - dated, categorized expenses;
-- fixed and recurring bills, including remaining-month balances.
+- recurring monthly bills and finite installment plans.
 
 The app must remain offline-first. Do not add accounts, cloud synchronization,
 analytics, remote APIs, advertising SDKs, or any feature that uploads financial
@@ -19,10 +19,15 @@ data. User records are stored on the device with `shared_preferences`.
 - Android application ID: `com.vlrdc.moneytrail`.
 - Primary accent: teal (`#00897B`, with deeper `#176B67`).
 - Light mode uses a clean off-white canvas and rounded white cards.
+- Savings goal panels must be white in light mode; do not use a gray
+  `surfaceContainerHighest` tint for these cards.
 - Dark mode uses a true black background and near-black cards.
 - Keep layouts clean, eye-catching, generously spaced, and consistent.
+- Soft coral/lavender background bubbles, colored section markers, and distinct
+  teal/coral payment accents add personality without reducing readability.
 - Avoid harsh multi-color gradients. The overview savings card uses a restrained
-  teal gradient; headers intentionally have no colored background.
+  teal gradient with a much darker variant in dark mode; headers intentionally
+  have no colored background.
 - Use 20–22 px horizontal gutters so cards and rows never touch screen edges.
 - Reusable brand assets live in `assets/branding/`:
   - `moneytrail-icon.png`: trail-and-coin app icon and overview logo.
@@ -45,9 +50,13 @@ data. User records are stored on the device with `shared_preferences`.
 ### Overview
 
 - The primary card shows total savings first.
+- The total-savings card has a fixed teal background, so all of its text uses
+  white rather than dynamic `onPrimary` colors in both themes.
 - Savings progress compares saved value against total savings targets.
 - Secondary metrics show current-month spending and available monthly budget.
 - Upcoming bills and recent expenses use the same horizontal gutters as lists.
+- Upcoming cards have the Pay action. Paying records the current month, updates
+  an installment balance when relevant, and removes it from Upcoming.
 
 ### Expenses
 
@@ -55,31 +64,43 @@ data. User records are stored on the device with `shared_preferences`.
 - Expenses are editable by tapping the row or its visible edit icon.
 - Updating a date re-sorts expenses newest-first.
 - Swipe from right to left to delete.
+- Every destructive delete action requires confirmation before data is removed.
 
 ### Bills
 
-- Bill types are `fixed` and `recurring`.
-- Fixed bills do not ask for or display installment/month details.
-- Recurring bills store total installments/months and months remaining.
-- Each recurring bill row shows amount per installment, total amount left,
-  months remaining, due day, and progress.
-- Bills can be reordered manually with the drag handle; order persists locally.
-- Tapping a bill opens editing. Recurring months left use explicit minus and
-  plus controls. There is intentionally no Pay button or checkbox.
+- The Payments page has separate Bills and Installments tabs. Stored type
+  `recurring` means an indefinite monthly bill; legacy `fixed` means a finite
+  installment plan.
+- Recurring bills have no total-month input and never complete. Their schedule
+  automatically extends through past months and twelve future months, so each
+  new month becomes payable. Installments require total installments and months
+  remaining, and can move from Ongoing to Completed.
+- Rows show amount/frequency, due day, start month, recorded payment count, and
+  installment balance/progress where relevant. The row action is Edit, not Pay.
+- Tapping either type opens a dedicated month/year schedule with paid
+  checkboxes. There is no floating update action on this screen.
+- Overview upcoming cards retain Pay. Paying records the current month and shows
+  a clear success/already-paid message; recurring bills become payable again
+  automatically when the calendar month changes.
+- Records can be reordered within their type/status group and order persists.
 - Local due-date notifications are scheduled on supported mobile platforms.
   Browser background notifications are not guaranteed after the browser closes.
 
 ### Savings
 
-- Savings goals have a title, target, saved amount, remaining amount, and
-  animated progress.
-- Goals can be created, edited, and deleted.
+- Savings goals have a title, target, accumulated saved amount, remaining
+  amount, and animated progress. Each card has an Add Savings action for new
+  contributions. Tapping a goal opens editing where the accumulated total can
+  be corrected manually; the goal form has no add-amount field.
+- Every goal has explicit edit and delete actions in its overflow menu; tapping
+  the goal also opens editing.
 
 ### Settings
 
-- Monthly budget is editable.
 - Theme choices are system, light, and dark.
 - The privacy card explains that data stays on the device.
+- The bottom of the More tab left-aligns `Victor Leandro R. Dela Cruz` without
+  a “Created by” label.
 
 ## Architecture
 
