@@ -252,6 +252,21 @@ class AppStore extends ChangeNotifier {
   double get savingsTarget => savings.fold(0, (a, s) => a + s.target);
   double get savingsRemaining =>
       savings.fold(0, (total, goal) => total + goal.remaining);
+  double get monthlyPaymentTotal {
+    final now = DateTime.now();
+    final thisMonth = DateTime(now.year, now.month);
+    return bills
+        .where(
+          (bill) =>
+              !bill.isCompleted &&
+              !DateTime(
+                bill.startMonth.year,
+                bill.startMonth.month,
+              ).isAfter(thisMonth),
+        )
+        .fold(0, (total, bill) => total + bill.amount);
+  }
+
   double get remaining => monthlyBudget - monthExpenses - unpaidBills;
 
   Future<void> load() async {
@@ -1117,9 +1132,9 @@ class Dashboard extends StatelessWidget {
               color: teal,
             ),
             MetricData(
-              icon: Icons.event_note_outlined,
-              label: 'Payments due',
-              value: money(store.unpaidBills),
+              icon: Icons.calendar_month_outlined,
+              label: 'Monthly payments',
+              value: money(store.monthlyPaymentTotal),
               color: const Color(0xFF8B7CF6),
             ),
             MetricData(
@@ -1130,7 +1145,6 @@ class Dashboard extends StatelessWidget {
             ),
           ],
         ),
-        MonthlyExpenseChart(expenses: store.expenses),
         SectionTitle(
           'Upcoming bills',
           upcoming.isEmpty ? '' : '${upcoming.length} remaining',
@@ -1167,137 +1181,6 @@ class Dashboard extends StatelessWidget {
       ],
     );
   }
-}
-
-class MonthlyExpenseChart extends StatelessWidget {
-  const MonthlyExpenseChart({super.key, required this.expenses});
-  final List<Expense> expenses;
-
-  @override
-  Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final days = DateTime(now.year, now.month + 1, 0).day;
-    final values = List<double>.filled(days, 0);
-    for (final expense in expenses) {
-      if (expense.date.year == now.year && expense.date.month == now.month) {
-        values[expense.date.day - 1] += expense.amount;
-      }
-    }
-    final total = values.fold<double>(0, (sum, value) => sum + value);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(9),
-                    decoration: BoxDecoration(
-                      color: coral.withValues(alpha: .14),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(Icons.show_chart_rounded, color: coral),
-                  ),
-                  const SizedBox(width: 11),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Expenses this month',
-                          style: TextStyle(fontWeight: FontWeight.w800),
-                        ),
-                        Text(
-                          money(total),
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(fontWeight: FontWeight.w900),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 18),
-              SizedBox(
-                height: 145,
-                width: double.infinity,
-                child: CustomPaint(
-                  painter: _ExpenseLinePainter(
-                    values: values,
-                    gridColor: Theme.of(
-                      context,
-                    ).colorScheme.outlineVariant.withValues(alpha: .45),
-                  ),
-                ),
-              ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('Day 1'),
-                  Text('Day ${(days / 2).round()}'),
-                  Text('Day $days'),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ExpenseLinePainter extends CustomPainter {
-  const _ExpenseLinePainter({required this.values, required this.gridColor});
-  final List<double> values;
-  final Color gridColor;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final maxValue = values.fold<double>(
-      0,
-      (max, value) => value > max ? value : max,
-    );
-    final chartMax = maxValue <= 0 ? 1.0 : maxValue * 1.15;
-    final gridPaint = Paint()
-      ..color = gridColor
-      ..strokeWidth = 1;
-    for (var line = 0; line <= 3; line++) {
-      final y = size.height * line / 3;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
-    }
-    final path = Path();
-    for (var index = 0; index < values.length; index++) {
-      final x = size.width * index / (values.length - 1);
-      final y = size.height - (values[index] / chartMax * size.height);
-      if (index == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
-    }
-    final fill = Path.from(path)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-    canvas.drawPath(fill, Paint()..color = coral.withValues(alpha: .10));
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = coral
-        ..strokeWidth = 3
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _ExpenseLinePainter oldDelegate) =>
-      oldDelegate.values != values || oldDelegate.gridColor != gridColor;
 }
 
 class GlassPanel extends StatelessWidget {
@@ -1673,6 +1556,28 @@ class BillsPage extends StatefulWidget {
 
 class _BillsPageState extends State<BillsPage> {
   int selectedTab = 0;
+  late final PageController pageController;
+
+  @override
+  void initState() {
+    super.initState();
+    pageController = PageController();
+  }
+
+  @override
+  void dispose() {
+    pageController.dispose();
+    super.dispose();
+  }
+
+  void selectTab(int value) {
+    setState(() => selectedTab = value);
+    pageController.animateToPage(
+      value,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1717,15 +1622,15 @@ class _BillsPageState extends State<BillsPage> {
                     ),
                   ],
                   selected: {selectedTab},
-                  onSelectionChanged: (value) =>
-                      setState(() => selectedTab = value.first),
+                  onSelectionChanged: (value) => selectTab(value.first),
                 ),
               ),
             ),
             const SizedBox(height: 10),
             Expanded(
-              child: IndexedStack(
-                index: selectedTab,
+              child: PageView(
+                controller: pageController,
+                onPageChanged: (value) => setState(() => selectedTab = value),
                 children: [
                   _BillsTypeTab(
                     bills: recurring,

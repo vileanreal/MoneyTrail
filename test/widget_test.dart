@@ -34,6 +34,47 @@ void main() {
     expect(store.remaining, 5750);
   });
 
+  test('monthly payments combine active bills and installments', () {
+    final now = DateTime.now();
+    final store = AppStore();
+    store.bills.addAll([
+      Bill(
+        id: 10,
+        title: 'Internet',
+        amount: 1500,
+        dueDay: 10,
+        type: 'recurring',
+        startMonth: DateTime(now.year, now.month),
+      ),
+      Bill(
+        id: 11,
+        title: 'Phone',
+        amount: 2000,
+        dueDay: 15,
+        totalInstallments: 6,
+        startMonth: DateTime(now.year, now.month),
+      ),
+      Bill(
+        id: 12,
+        title: 'Future plan',
+        amount: 3000,
+        dueDay: 20,
+        startMonth: DateTime(now.year, now.month + 1),
+      ),
+      Bill(
+        id: 13,
+        title: 'Completed plan',
+        amount: 1000,
+        dueDay: 5,
+        totalInstallments: 1,
+        remainingInstallments: 0,
+        startMonth: DateTime(now.year, now.month - 1),
+      ),
+    ]);
+
+    expect(store.monthlyPaymentTotal, 3500);
+  });
+
   test('bill payments track months and cannot duplicate a month', () async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();

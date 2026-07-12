@@ -60,9 +60,9 @@ is the user-triggered GitHub Release update checker.
 - Upcoming bills and recent expenses use the same horizontal gutters as lists.
 - Upcoming cards have the Pay action. Paying records the current month, updates
   an installment balance when relevant, and removes it from Upcoming.
-- A custom line chart summarizes daily expenses in the current month.
 - Overview metrics are a swipeable carousel: month spending, allowance
-  available, payments due, and remaining savings-goal amount.
+  available, total active monthly bill/installment commitments, and remaining
+  savings-goal amount.
 
 ### Expenses
 
@@ -77,7 +77,8 @@ is the user-triggered GitHub Release update checker.
 
 - The Payments page has separate Bills and Installments tabs. Stored type
   `recurring` means an indefinite monthly bill; legacy `fixed` means a finite
-  installment plan.
+  installment plan. The two tabs can be selected directly or navigated by
+  swiping horizontally.
 - Recurring bills have no total-month input and never complete. Their detail
   screen shows only previous/current/next month, so each new month becomes
   payable. Installments require only total installments; remaining payments are
