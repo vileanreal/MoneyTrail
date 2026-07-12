@@ -61,6 +61,8 @@ is the user-triggered GitHub Release update checker.
 - Upcoming cards have the Pay action. Paying records the current month, updates
   an installment balance when relevant, and removes it from Upcoming.
 - A custom line chart summarizes daily expenses in the current month.
+- Overview metrics are a swipeable carousel: month spending, allowance
+  available, payments due, and remaining savings-goal amount.
 
 ### Expenses
 
@@ -87,8 +89,9 @@ is the user-triggered GitHub Release update checker.
 - Overview upcoming cards retain Pay. Paying records the current month and shows
   a clear success/already-paid message; recurring bills become payable again
   automatically when the calendar month changes.
-- Ongoing and Completed groups are collapsible. Records can be reordered within
-  their type/status group and order persists.
+- Ongoing and Completed groups are borderless, collapsible, and expanded by
+  default. Records can be reordered within their type/status group and order
+  persists.
 - Local due-date notifications are scheduled on supported mobile platforms.
   Browser background notifications are not guaranteed after the browser closes.
 
@@ -112,8 +115,7 @@ is the user-triggered GitHub Release update checker.
   downloads the APK on Android, and opens the system package installer. Other
   platforms open the download externally. Never embed a GitHub token.
 - The privacy card explains that data stays on the device.
-- The bottom of the More tab left-aligns `Victor Leandro R. Dela Cruz` without
-  a “Created by” label.
+- The bottom of the More tab left-aligns `VLRDC` without a “Created by” label.
 
 ## Architecture
 

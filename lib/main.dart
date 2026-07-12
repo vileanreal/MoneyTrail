@@ -250,6 +250,8 @@ class AppStore extends ChangeNotifier {
   double get billsLeftTotal => bills.fold(0, (a, b) => a + b.amountLeft);
   double get totalSavings => savings.fold(0, (a, s) => a + s.saved);
   double get savingsTarget => savings.fold(0, (a, s) => a + s.target);
+  double get savingsRemaining =>
+      savings.fold(0, (total, goal) => total + goal.remaining);
   double get remaining => monthlyBudget - monthExpenses - unpaidBills;
 
   Future<void> load() async {
@@ -1100,27 +1102,33 @@ class Dashboard extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 12),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Row(
-            children: [
-              Expanded(
-                child: MetricCard(
-                  icon: Icons.shopping_bag_outlined,
-                  label: 'Spent',
-                  value: money(store.monthExpenses),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: MetricCard(
-                  icon: Icons.account_balance_wallet_outlined,
-                  label: 'Available',
-                  value: money(store.remaining),
-                ),
-              ),
-            ],
-          ),
+        StatsCarousel(
+          items: [
+            MetricData(
+              icon: Icons.shopping_bag_outlined,
+              label: 'Spent this month',
+              value: money(store.monthExpenses),
+              color: coral,
+            ),
+            MetricData(
+              icon: Icons.account_balance_wallet_outlined,
+              label: 'Allowance available',
+              value: money(store.remaining),
+              color: teal,
+            ),
+            MetricData(
+              icon: Icons.event_note_outlined,
+              label: 'Payments due',
+              value: money(store.unpaidBills),
+              color: const Color(0xFF8B7CF6),
+            ),
+            MetricData(
+              icon: Icons.flag_outlined,
+              label: 'Savings to go',
+              value: money(store.savingsRemaining),
+              color: const Color(0xFFFFA23A),
+            ),
+          ],
         ),
         MonthlyExpenseChart(expenses: store.expenses),
         SectionTitle(
@@ -1331,27 +1339,125 @@ class GlassPanel extends StatelessWidget {
   );
 }
 
+class MetricData {
+  const MetricData({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+}
+
+class StatsCarousel extends StatefulWidget {
+  const StatsCarousel({super.key, required this.items});
+  final List<MetricData> items;
+
+  @override
+  State<StatsCarousel> createState() => _StatsCarouselState();
+}
+
+class _StatsCarouselState extends State<StatsCarousel> {
+  late final PageController controller;
+  int page = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    controller = PageController(viewportFraction: .47);
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      SizedBox(
+        height: 148,
+        child: PageView.builder(
+          controller: controller,
+          padEnds: false,
+          itemCount: widget.items.length,
+          onPageChanged: (value) => setState(() => page = value),
+          itemBuilder: (_, index) {
+            final item = widget.items[index];
+            return Padding(
+              padding: EdgeInsets.only(
+                left: index == 0 ? 20 : 4,
+                right: index == widget.items.length - 1 ? 20 : 8,
+              ),
+              child: MetricCard(
+                icon: item.icon,
+                label: item.label,
+                value: item.value,
+                color: item.color,
+              ),
+            );
+          },
+        ),
+      ),
+      const SizedBox(height: 6),
+      Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: List.generate(
+          widget.items.length,
+          (index) => AnimatedContainer(
+            duration: const Duration(milliseconds: 220),
+            width: index == page ? 18 : 6,
+            height: 6,
+            margin: const EdgeInsets.symmetric(horizontal: 3),
+            decoration: BoxDecoration(
+              color: index == page
+                  ? teal
+                  : Theme.of(context).colorScheme.outlineVariant,
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+      ),
+    ],
+  );
+}
+
 class MetricCard extends StatelessWidget {
   const MetricCard({
     super.key,
     required this.icon,
     required this.label,
     required this.value,
+    this.color = teal,
   });
   final IconData icon;
   final String label;
   final String value;
+  final Color color;
   @override
   Widget build(BuildContext context) => Card(
     child: Padding(
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: teal),
-          const SizedBox(height: 18),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .14),
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(icon, color: color),
+          ),
+          const SizedBox(height: 10),
           Text(
             label,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
@@ -1705,6 +1811,10 @@ class _BillsTypeTab extends StatelessWidget {
             margin: const EdgeInsets.only(bottom: 14),
             child: ExpansionTile(
               initiallyExpanded: true,
+              shape: const RoundedRectangleBorder(side: BorderSide.none),
+              collapsedShape: const RoundedRectangleBorder(
+                side: BorderSide.none,
+              ),
               leading: const CircleAvatar(
                 backgroundColor: teal,
                 foregroundColor: Colors.white,
@@ -1733,6 +1843,11 @@ class _BillsTypeTab extends StatelessWidget {
           Card(
             margin: const EdgeInsets.only(bottom: 14),
             child: ExpansionTile(
+              initiallyExpanded: true,
+              shape: const RoundedRectangleBorder(side: BorderSide.none),
+              collapsedShape: const RoundedRectangleBorder(
+                side: BorderSide.none,
+              ),
               leading: const CircleAvatar(
                 backgroundColor: Color(0xFF8B7CF6),
                 foregroundColor: Colors.white,
@@ -2321,7 +2436,7 @@ class SettingsPage extends StatelessWidget {
             ),
             const SizedBox(width: 10),
             Text(
-              'Victor Leandro R. Dela Cruz',
+              'VLRDC',
               style: Theme.of(
                 context,
               ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
