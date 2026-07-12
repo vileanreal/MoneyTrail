@@ -10,18 +10,21 @@ Flutter. It supports Android, iOS, and web. The product tracks three areas:
 - recurring monthly bills and finite installment plans.
 
 The app must remain offline-first. Do not add accounts, cloud synchronization,
-analytics, remote APIs, advertising SDKs, or any feature that uploads financial
-data. User records are stored on the device with `shared_preferences`.
+analytics, advertising SDKs, or anything that uploads financial data. User
+records are stored on-device with `shared_preferences`. The only network feature
+is the user-triggered GitHub Release update checker.
 
 ## Brand and visual direction
 
 - Product and package name: **MoneyTrail** / `money_trail`.
 - Android application ID: `com.vlrdc.moneytrail`.
-- Primary accent: teal (`#00897B`, with deeper `#176B67`).
+- Primary accent: teal (`#00897B`, with deeper `#176B67`); secondary accent is
+  reddish coral (`#FF6F5E`) matching the logo.
 - Light mode uses a clean off-white canvas and rounded white cards.
 - Savings goal panels must be white in light mode; do not use a gray
   `surfaceContainerHighest` tint for these cards.
-- Dark mode uses a true black background and near-black cards.
+- Dark mode uses a lifted deep green-black background (`#101816`) and visibly
+  lighter cards (`#1B2724`) so surfaces remain distinct.
 - Keep layouts clean, eye-catching, generously spaced, and consistent.
 - Soft coral/lavender background bubbles, colored section markers, and distinct
   teal/coral payment accents add personality without reducing readability.
@@ -57,12 +60,14 @@ data. User records are stored on the device with `shared_preferences`.
 - Upcoming bills and recent expenses use the same horizontal gutters as lists.
 - Upcoming cards have the Pay action. Paying records the current month, updates
   an installment balance when relevant, and removes it from Upcoming.
+- A custom line chart summarizes daily expenses in the current month.
 
 ### Expenses
 
 - Expense fields: ID, title, amount, category, and user-selected date.
 - Expenses are editable by tapping the row or its visible edit icon.
 - Updating a date re-sorts expenses newest-first.
+- The list can be sorted by newest date or name A–Z without mutating storage.
 - Swipe from right to left to delete.
 - Every destructive delete action requires confirmation before data is removed.
 
@@ -71,10 +76,10 @@ data. User records are stored on the device with `shared_preferences`.
 - The Payments page has separate Bills and Installments tabs. Stored type
   `recurring` means an indefinite monthly bill; legacy `fixed` means a finite
   installment plan.
-- Recurring bills have no total-month input and never complete. Their schedule
-  automatically extends through past months and twelve future months, so each
-  new month becomes payable. Installments require total installments and months
-  remaining, and can move from Ongoing to Completed.
+- Recurring bills have no total-month input and never complete. Their detail
+  screen shows only previous/current/next month, so each new month becomes
+  payable. Installments require only total installments; remaining payments are
+  calculated from checked schedule entries and can move to Completed.
 - Rows show amount/frequency, due day, start month, recorded payment count, and
   installment balance/progress where relevant. The row action is Edit, not Pay.
 - Tapping either type opens a dedicated month/year schedule with paid
@@ -82,7 +87,8 @@ data. User records are stored on the device with `shared_preferences`.
 - Overview upcoming cards retain Pay. Paying records the current month and shows
   a clear success/already-paid message; recurring bills become payable again
   automatically when the calendar month changes.
-- Records can be reordered within their type/status group and order persists.
+- Ongoing and Completed groups are collapsible. Records can be reordered within
+  their type/status group and order persists.
 - Local due-date notifications are scheduled on supported mobile platforms.
   Browser background notifications are not guaranteed after the browser closes.
 
@@ -97,7 +103,14 @@ data. User records are stored on the device with `shared_preferences`.
 
 ### Settings
 
+- Monthly allowance is editable.
+- Currency is selectable (PHP, USD, EUR, GBP, JPY, AUD, CAD, SGD) and updates
+  all displayed amounts.
 - Theme choices are system, light, and dark.
+- “Check for latest version” queries the public GitHub latest-release API. It
+  compares the release body `Build: N` value with the installed build number,
+  downloads the APK on Android, and opens the system package installer. Other
+  platforms open the download externally. Never embed a GitHub token.
 - The privacy card explains that data stays on the device.
 - The bottom of the More tab left-aligns `Victor Leandro R. Dela Cruz` without
   a “Created by” label.
@@ -112,7 +125,7 @@ data. User records are stored on the device with `shared_preferences`.
 - Models serialize to JSON and are saved using `shared_preferences`.
 - `NotificationService` uses `flutter_local_notifications`, `timezone`, and
   `flutter_timezone` for recurring local bill reminders.
-- Currency is currently Philippine peso (`₱`) through the `money()` formatter.
+- Currency display uses the persisted global currency code through `money()`.
 
 ## Platform notes
 
@@ -122,6 +135,8 @@ data. User records are stored on the device with `shared_preferences`.
 - iOS and Android display names are MoneyTrail.
 - The default generated Flutter launch image was removed. Native launch
   backgrounds are teal in light mode and black in dark mode.
+- Android declares internet and package-install permissions solely for the
+  explicit update checker/install flow.
 - App icons are generated with `flutter_launcher_icons` from the brand icon.
 
 ## Development and verification

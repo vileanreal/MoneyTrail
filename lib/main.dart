@@ -2,15 +2,34 @@ import 'dart:convert';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:intl/intl.dart';
+import 'package:http/http.dart' as http;
+import 'package:open_filex/open_filex.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+import 'package:universal_io/io.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 const teal = Color(0xFF00897B);
+const coral = Color(0xFFFF6F5E);
+const currencyOptions = <String, ({String symbol, int decimals})>{
+  'PHP': (symbol: '₱', decimals: 2),
+  'USD': (symbol: r'$', decimals: 2),
+  'EUR': (symbol: '€', decimals: 2),
+  'GBP': (symbol: '£', decimals: 2),
+  'JPY': (symbol: '¥', decimals: 0),
+  'AUD': (symbol: r'A$', decimals: 2),
+  'CAD': (symbol: r'C$', decimals: 2),
+  'SGD': (symbol: r'S$', decimals: 2),
+};
+String activeCurrencyCode = 'PHP';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -48,8 +67,8 @@ ThemeData appTheme(Brightness brightness) {
     brightness: brightness,
     surface: brightness == Brightness.light
         ? const Color(0xFFF6F6FA)
-        : Colors.black,
-  );
+        : const Color(0xFF101816),
+  ).copyWith(secondary: coral, tertiary: const Color(0xFF8B7CF6));
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
@@ -58,16 +77,28 @@ ThemeData appTheme(Brightness brightness) {
       elevation: brightness == Brightness.light ? 1 : 0,
       color: brightness == Brightness.light
           ? Colors.white
-          : const Color(0xFF0B0B0B),
+          : const Color(0xFF1B2724),
       shadowColor: const Color(0xFF6D67A8).withValues(alpha: .12),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
+      fillColor: brightness == Brightness.light
+          ? Colors.white
+          : const Color(0xFF202D2A),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(16),
         borderSide: BorderSide.none,
       ),
+    ),
+    floatingActionButtonTheme: const FloatingActionButtonThemeData(
+      backgroundColor: coral,
+      foregroundColor: Colors.white,
+    ),
+    navigationBarTheme: NavigationBarThemeData(
+      indicatorColor: brightness == Brightness.light
+          ? coral.withValues(alpha: .18)
+          : coral.withValues(alpha: .28),
     ),
   );
 }
@@ -202,6 +233,7 @@ class AppStore extends ChangeNotifier {
   final savings = <SavingGoal>[];
   ThemeMode themeMode = ThemeMode.system;
   double monthlyBudget = 30000;
+  String currencyCode = 'PHP';
   bool hasSeenWelcome = false;
 
   double get monthExpenses => expenses
@@ -223,6 +255,9 @@ class AppStore extends ChangeNotifier {
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     monthlyBudget = p.getDouble('budget') ?? 30000;
+    currencyCode = p.getString('currencyCode') ?? 'PHP';
+    if (!currencyOptions.containsKey(currencyCode)) currencyCode = 'PHP';
+    activeCurrencyCode = currencyCode;
     hasSeenWelcome = p.getBool('hasSeenWelcome') ?? false;
     themeMode = ThemeMode.values[p.getInt('theme') ?? 0];
     final expenseData = p.getString('expenses');
@@ -246,6 +281,7 @@ class AppStore extends ChangeNotifier {
   Future<void> save() async {
     final p = await SharedPreferences.getInstance();
     await p.setDouble('budget', monthlyBudget);
+    await p.setString('currencyCode', currencyCode);
     await p.setBool('hasSeenWelcome', hasSeenWelcome);
     await p.setInt('theme', themeMode.index);
     await p.setString(
@@ -411,6 +447,14 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setCurrency(String value) async {
+    if (!currencyOptions.containsKey(value)) return;
+    currencyCode = value;
+    activeCurrencyCode = value;
+    notifyListeners();
+    await save();
+  }
+
   Future<void> completeWelcome() async {
     hasSeenWelcome = true;
     notifyListeners();
@@ -493,8 +537,181 @@ class NotificationService {
   Future<void> cancel(int id) => plugin.cancel(id: id);
 }
 
-String money(double value) =>
-    NumberFormat.currency(symbol: '₱', decimalDigits: 2).format(value);
+String money(double value) {
+  final currency = currencyOptions[activeCurrencyCode]!;
+  return NumberFormat.currency(
+    symbol: currency.symbol,
+    decimalDigits: currency.decimals,
+  ).format(value);
+}
+
+class GitHubReleaseInfo {
+  const GitHubReleaseInfo({
+    required this.version,
+    required this.buildNumber,
+    required this.downloadUrl,
+    required this.releaseUrl,
+  });
+  final String version;
+  final int buildNumber;
+  final String downloadUrl;
+  final String releaseUrl;
+}
+
+class UpdateService {
+  static const latestReleaseApi =
+      'https://api.github.com/repos/vileanreal/MoneyTrail/releases/latest';
+
+  static Future<({GitHubReleaseInfo release, bool hasUpdate, String current})>
+  check() async {
+    final response = await http
+        .get(
+          Uri.parse(latestReleaseApi),
+          headers: const {
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': 'MoneyTrail-App',
+          },
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 200) {
+      throw Exception('GitHub returned ${response.statusCode}.');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final assets = (data['assets'] as List).cast<Map<String, dynamic>>();
+    final apk = assets.cast<Map<String, dynamic>?>().firstWhere(
+      (asset) => (asset?['name'] as String? ?? '').endsWith('.apk'),
+      orElse: () => null,
+    );
+    if (apk == null) throw Exception('The latest release has no APK.');
+    final body = data['body'] as String? ?? '';
+    final buildMatch = RegExp(
+      r'Build:\s*(\d+)',
+      caseSensitive: false,
+    ).firstMatch(body);
+    final latestBuild = int.tryParse(buildMatch?.group(1) ?? '') ?? 1;
+    final package = await PackageInfo.fromPlatform();
+    final currentBuild = int.tryParse(package.buildNumber) ?? 1;
+    final tag = (data['tag_name'] as String? ?? 'v1.0.0').replaceFirst('v', '');
+    return (
+      release: GitHubReleaseInfo(
+        version: tag,
+        buildNumber: latestBuild,
+        downloadUrl: apk['browser_download_url'] as String,
+        releaseUrl: data['html_url'] as String,
+      ),
+      hasUpdate: latestBuild > currentBuild,
+      current: '${package.version}+${package.buildNumber}',
+    );
+  }
+
+  static Future<void> downloadAndInstall(GitHubReleaseInfo release) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      await launchUrl(
+        Uri.parse(release.downloadUrl),
+        mode: LaunchMode.externalApplication,
+      );
+      return;
+    }
+    final response = await http
+        .get(Uri.parse(release.downloadUrl))
+        .timeout(const Duration(minutes: 3));
+    if (response.statusCode != 200) {
+      throw Exception('Download failed (${response.statusCode}).');
+    }
+    final directory = await getTemporaryDirectory();
+    final file = File('${directory.path}/MoneyTrail-latest.apk');
+    await file.writeAsBytes(response.bodyBytes, flush: true);
+    final result = await OpenFilex.open(
+      file.path,
+      type: 'application/vnd.android.package-archive',
+    );
+    if (result.type != ResultType.done) throw Exception(result.message);
+  }
+}
+
+Future<void> showUpdateChecker(BuildContext context) async {
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const AlertDialog(
+      content: Row(
+        children: [
+          CircularProgressIndicator(),
+          SizedBox(width: 18),
+          Expanded(child: Text('Checking GitHub for updates…')),
+        ],
+      ),
+    ),
+  );
+  try {
+    final result = await UpdateService.check();
+    if (!context.mounted) return;
+    Navigator.pop(context);
+    if (!result.hasUpdate) {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.verified_rounded, color: teal),
+          title: const Text('MoneyTrail is up to date'),
+          content: Text('Installed version: ${result.current}'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    final shouldInstall = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.system_update_rounded, color: coral),
+        title: Text('MoneyTrail ${result.release.version} is available'),
+        content: Text(
+          'Build ${result.release.buildNumber} is newer than ${result.current}. Download and open the installer now?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Later'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.download_rounded),
+            label: const Text('Download'),
+          ),
+        ],
+      ),
+    );
+    if (shouldInstall != true || !context.mounted) return;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 18),
+            Expanded(child: Text('Downloading the latest APK…')),
+          ],
+        ),
+      ),
+    );
+    await UpdateService.downloadAndInstall(result.release);
+    if (context.mounted) Navigator.pop(context);
+  } catch (error) {
+    if (!context.mounted) return;
+    Navigator.of(
+      context,
+      rootNavigator: true,
+    ).popUntil((route) => route.isFirst);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Could not check for updates: $error')),
+    );
+  }
+}
 
 Future<bool> confirmDelete(BuildContext context, String itemName) async {
   return await showDialog<bool>(
@@ -786,13 +1003,15 @@ class PageHeader extends StatelessWidget {
                   fontWeight: FontWeight.w900,
                 ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                subtitle,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+              if (subtitle.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
-              ),
+              ],
             ],
           ),
         ),
@@ -903,6 +1122,7 @@ class Dashboard extends StatelessWidget {
             ],
           ),
         ),
+        MonthlyExpenseChart(expenses: store.expenses),
         SectionTitle(
           'Upcoming bills',
           upcoming.isEmpty ? '' : '${upcoming.length} remaining',
@@ -941,6 +1161,137 @@ class Dashboard extends StatelessWidget {
   }
 }
 
+class MonthlyExpenseChart extends StatelessWidget {
+  const MonthlyExpenseChart({super.key, required this.expenses});
+  final List<Expense> expenses;
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final days = DateTime(now.year, now.month + 1, 0).day;
+    final values = List<double>.filled(days, 0);
+    for (final expense in expenses) {
+      if (expense.date.year == now.year && expense.date.month == now.month) {
+        values[expense.date.day - 1] += expense.amount;
+      }
+    }
+    final total = values.fold<double>(0, (sum, value) => sum + value);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(9),
+                    decoration: BoxDecoration(
+                      color: coral.withValues(alpha: .14),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.show_chart_rounded, color: coral),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Expenses this month',
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                        Text(
+                          money(total),
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(fontWeight: FontWeight.w900),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                height: 145,
+                width: double.infinity,
+                child: CustomPaint(
+                  painter: _ExpenseLinePainter(
+                    values: values,
+                    gridColor: Theme.of(
+                      context,
+                    ).colorScheme.outlineVariant.withValues(alpha: .45),
+                  ),
+                ),
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('Day 1'),
+                  Text('Day ${(days / 2).round()}'),
+                  Text('Day $days'),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ExpenseLinePainter extends CustomPainter {
+  const _ExpenseLinePainter({required this.values, required this.gridColor});
+  final List<double> values;
+  final Color gridColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final maxValue = values.fold<double>(
+      0,
+      (max, value) => value > max ? value : max,
+    );
+    final chartMax = maxValue <= 0 ? 1.0 : maxValue * 1.15;
+    final gridPaint = Paint()
+      ..color = gridColor
+      ..strokeWidth = 1;
+    for (var line = 0; line <= 3; line++) {
+      final y = size.height * line / 3;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+    }
+    final path = Path();
+    for (var index = 0; index < values.length; index++) {
+      final x = size.width * index / (values.length - 1);
+      final y = size.height - (values[index] / chartMax * size.height);
+      if (index == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    final fill = Path.from(path)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(fill, Paint()..color = coral.withValues(alpha: .10));
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = coral
+        ..strokeWidth = 3
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _ExpenseLinePainter oldDelegate) =>
+      oldDelegate.values != values || oldDelegate.gridColor != gridColor;
+}
+
 class GlassPanel extends StatelessWidget {
   const GlassPanel({super.key, required this.child, this.gradient});
   final Widget child;
@@ -958,7 +1309,7 @@ class GlassPanel extends StatelessWidget {
           color: gradient == null
               ? Theme.of(context).brightness == Brightness.light
                     ? Colors.white
-                    : const Color(0xFF0B0B0B)
+                    : const Color(0xFF1B2724)
               : null,
           borderRadius: BorderRadius.circular(26),
           border: Border.all(
@@ -1075,31 +1426,78 @@ class EmptyCard extends StatelessWidget {
   );
 }
 
-class ExpensesPage extends StatelessWidget {
+class ExpensesPage extends StatefulWidget {
   const ExpensesPage({super.key, required this.store});
   final AppStore store;
+
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      const PageHeader('Expenses', 'Everything you spend, in one place'),
-      Expanded(
-        child: store.expenses.isEmpty
-            ? const Center(
-                child: EmptyState(
-                  icon: Icons.receipt_long_outlined,
-                  title: 'No expenses yet',
-                  body: 'Tap “Expense” to record your first purchase.',
+  State<ExpensesPage> createState() => _ExpensesPageState();
+}
+
+class _ExpensesPageState extends State<ExpensesPage> {
+  String sortBy = 'date';
+
+  @override
+  Widget build(BuildContext context) {
+    final expenses = [...widget.store.expenses];
+    if (sortBy == 'name') {
+      expenses.sort(
+        (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
+      );
+    } else {
+      expenses.sort((a, b) => b.date.compareTo(a.date));
+    }
+    return Column(
+      children: [
+        const PageHeader('Expenses', 'Everything you spend, in one place'),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+          child: Row(
+            children: [
+              Text('Sort by', style: Theme.of(context).textTheme.labelLarge),
+              const SizedBox(width: 10),
+              Expanded(
+                child: SegmentedButton<String>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(
+                      value: 'date',
+                      icon: Icon(Icons.calendar_today_outlined),
+                      label: Text('Date'),
+                    ),
+                    ButtonSegment(
+                      value: 'name',
+                      icon: Icon(Icons.sort_by_alpha_rounded),
+                      label: Text('Name'),
+                    ),
+                  ],
+                  selected: {sortBy},
+                  onSelectionChanged: (value) =>
+                      setState(() => sortBy = value.first),
                 ),
-              )
-            : ListView.builder(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 90),
-                itemCount: store.expenses.length,
-                itemBuilder: (_, i) =>
-                    ExpenseTile(expense: store.expenses[i], store: store),
               ),
-      ),
-    ],
-  );
+            ],
+          ),
+        ),
+        Expanded(
+          child: expenses.isEmpty
+              ? const Center(
+                  child: EmptyState(
+                    icon: Icons.receipt_long_outlined,
+                    title: 'No expenses yet',
+                    body: 'Tap “Expense” to record your first purchase.',
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 90),
+                  itemCount: expenses.length,
+                  itemBuilder: (_, i) =>
+                      ExpenseTile(expense: expenses[i], store: widget.store),
+                ),
+        ),
+      ],
+    );
+  }
 }
 
 class ExpenseTile extends StatelessWidget {
@@ -1303,21 +1701,60 @@ class _BillsTypeTab extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
       children: [
         if (ongoing.isNotEmpty) ...[
-          const SectionTitle('Ongoing', ''),
-          _BillGroup(
-            bills: ongoing,
-            store: store,
-            onReorder: (oldIndex, newIndex) =>
-                _reorder(ongoing, oldIndex, newIndex),
+          Card(
+            margin: const EdgeInsets.only(bottom: 14),
+            child: ExpansionTile(
+              initiallyExpanded: true,
+              leading: const CircleAvatar(
+                backgroundColor: teal,
+                foregroundColor: Colors.white,
+                child: Icon(Icons.play_arrow_rounded),
+              ),
+              title: const Text(
+                'Ongoing',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+              subtitle: Text(
+                '${ongoing.length} record${ongoing.length == 1 ? '' : 's'}',
+              ),
+              childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              children: [
+                _BillGroup(
+                  bills: ongoing,
+                  store: store,
+                  onReorder: (oldIndex, newIndex) =>
+                      _reorder(ongoing, oldIndex, newIndex),
+                ),
+              ],
+            ),
           ),
         ],
         if (completed.isNotEmpty) ...[
-          const SectionTitle('Completed', ''),
-          _BillGroup(
-            bills: completed,
-            store: store,
-            onReorder: (oldIndex, newIndex) =>
-                _reorder(completed, oldIndex, newIndex),
+          Card(
+            margin: const EdgeInsets.only(bottom: 14),
+            child: ExpansionTile(
+              leading: const CircleAvatar(
+                backgroundColor: Color(0xFF8B7CF6),
+                foregroundColor: Colors.white,
+                child: Icon(Icons.check_rounded),
+              ),
+              title: const Text(
+                'Completed',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+              subtitle: Text(
+                '${completed.length} record${completed.length == 1 ? '' : 's'}',
+              ),
+              childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              children: [
+                _BillGroup(
+                  bills: completed,
+                  store: store,
+                  onReorder: (oldIndex, newIndex) =>
+                      _reorder(completed, oldIndex, newIndex),
+                ),
+              ],
+            ),
           ),
         ],
       ],
@@ -1420,7 +1857,7 @@ class BillTile extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text(
                       bill.type == 'fixed'
-                          ? '${bill.remainingInstallments} of ${bill.totalInstallments} installments left · due day ${bill.dueDay}'
+                          ? '${bill.paidMonths.length} of ${bill.totalInstallments} payments completed · due day ${bill.dueDay}'
                           : 'Monthly bill · due day ${bill.dueDay}',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
@@ -1522,18 +1959,17 @@ class BillDetailsPage extends StatelessWidget {
     listenable: store,
     builder: (context, _) {
       final now = DateTime.now();
-      final monthsSinceStart =
-          (now.year - bill.startMonth.year) * 12 +
-          now.month -
-          bill.startMonth.month;
-      final scheduleLength = bill.type == 'recurring'
-          ? (monthsSinceStart + 13 > 12 ? monthsSinceStart + 13 : 12)
-          : bill.totalInstallments;
-      final months = List.generate(
-        scheduleLength,
-        (index) =>
-            DateTime(bill.startMonth.year, bill.startMonth.month + index),
-      );
+      final months = bill.type == 'recurring'
+          ? [
+              DateTime(now.year, now.month - 1),
+              DateTime(now.year, now.month),
+              DateTime(now.year, now.month + 1),
+            ].where((month) => !month.isBefore(bill.startMonth)).toList()
+          : List.generate(
+              bill.totalInstallments,
+              (index) =>
+                  DateTime(bill.startMonth.year, bill.startMonth.month + index),
+            );
       return Scaffold(
         appBar: AppBar(title: Text(bill.title)),
         body: ListView(
@@ -1571,8 +2007,8 @@ class BillDetailsPage extends StatelessWidget {
                         ),
                         Text(
                           bill.type == 'recurring'
-                              ? '${bill.paidMonths.length} months paid · renews monthly'
-                              : '${bill.paidMonths.length} paid · ${bill.remainingInstallments} remaining',
+                              ? 'Renews monthly · due day ${bill.dueDay}'
+                              : '${money(bill.amountLeft)} remaining balance',
                         ),
                       ],
                     ),
@@ -1591,7 +2027,9 @@ class BillDetailsPage extends StatelessWidget {
             ),
             const SizedBox(height: 24),
             Text(
-              'Payment schedule',
+              bill.type == 'recurring'
+                  ? 'Previous, current & next month'
+                  : 'Payment schedule',
               style: Theme.of(
                 context,
               ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
@@ -1767,7 +2205,49 @@ class SettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ListView(
     children: [
-      const PageHeader('More', 'Make MoneyTrail feel like yours'),
+      const PageHeader('More', ''),
+      const SectionTitle('Money settings', ''),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Card(
+          child: Column(
+            children: [
+              ListTile(
+                contentPadding: const EdgeInsets.all(16),
+                leading: const CircleAvatar(
+                  child: Icon(Icons.account_balance_wallet_outlined),
+                ),
+                title: const Text('Monthly allowance'),
+                subtitle: Text(money(store.monthlyBudget)),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => showBudgetDialog(context, store),
+              ),
+              const Divider(height: 1),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: DropdownButtonFormField<String>(
+                  initialValue: store.currencyCode,
+                  decoration: const InputDecoration(
+                    labelText: 'Currency',
+                    prefixIcon: Icon(Icons.currency_exchange_rounded),
+                  ),
+                  items: currencyOptions.entries
+                      .map(
+                        (entry) => DropdownMenuItem(
+                          value: entry.key,
+                          child: Text('${entry.key}  ${entry.value.symbol}'),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) store.setCurrency(value);
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
       const SectionTitle('Appearance', ''),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -1794,6 +2274,26 @@ class SettingsPage extends StatelessWidget {
                   )
                   .toList(),
             ),
+          ),
+        ),
+      ),
+      const SectionTitle('App', ''),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Card(
+          child: ListTile(
+            contentPadding: const EdgeInsets.all(16),
+            leading: const CircleAvatar(
+              backgroundColor: coral,
+              foregroundColor: Colors.white,
+              child: Icon(Icons.system_update_rounded),
+            ),
+            title: const Text('Check for latest version'),
+            subtitle: const Text(
+              'Download and install the newest GitHub release.',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showUpdateChecker(context),
           ),
         ),
       ),
@@ -2011,9 +2511,7 @@ Future<void> showBillSheet(
   int day = bill?.dueDay ?? DateTime.now().day.clamp(1, 28);
   bool reminder = bill?.reminder ?? true;
   int installments = bill?.totalInstallments ?? 1;
-  int remaining = bill?.remainingInstallments ?? 1;
   final installmentsInput = TextEditingController(text: '$installments');
-  final remainingInput = TextEditingController(text: '$remaining');
   String billType = bill?.type ?? initialType ?? 'recurring';
   DateTime startMonth =
       bill?.startMonth ?? DateTime(DateTime.now().year, DateTime.now().month);
@@ -2080,9 +2578,7 @@ Future<void> showBillSheet(
                   billType = value.first;
                   if (billType == 'recurring') {
                     installments = 1;
-                    remaining = 1;
                     installmentsInput.text = '1';
-                    remainingInput.text = '1';
                   }
                 }),
               ),
@@ -2128,48 +2624,19 @@ Future<void> showBillSheet(
               ),
               const SizedBox(height: 12),
               if (billType == 'fixed')
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: installmentsInput,
-                        keyboardType: TextInputType.number,
-                        inputFormatters: [
-                          FilteringTextInputFormatter.digitsOnly,
-                        ],
-                        decoration: const InputDecoration(
-                          labelText: 'Total installments',
-                        ),
-                        onChanged: (text) {
-                          final value = int.tryParse(text);
-                          if (value == null || value < 1) return;
-                          installments = value;
-                          if (remaining > installments) {
-                            remaining = installments;
-                            remainingInput.text = '$remaining';
-                          }
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextField(
-                        controller: remainingInput,
-                        keyboardType: TextInputType.number,
-                        inputFormatters: [
-                          FilteringTextInputFormatter.digitsOnly,
-                        ],
-                        decoration: const InputDecoration(
-                          labelText: 'Months left',
-                        ),
-                        onChanged: (text) {
-                          final value = int.tryParse(text);
-                          if (value == null || value < 0) return;
-                          remaining = value;
-                        },
-                      ),
-                    ),
-                  ],
+                TextField(
+                  controller: installmentsInput,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: const InputDecoration(
+                    labelText: 'Total installments',
+                    helperText:
+                        'Remaining payments are calculated from the schedule.',
+                  ),
+                  onChanged: (text) {
+                    final value = int.tryParse(text);
+                    if (value != null && value > 0) installments = value;
+                  },
                 ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -2177,43 +2644,23 @@ Future<void> showBillSheet(
                 value: reminder,
                 onChanged: (v) => setModalState(() => reminder = v),
               ),
-              if (bill != null && bill.paidMonths.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(
-                  'Paid months',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: bill.paidMonths.map((month) {
-                    final date = DateTime.parse('$month-01');
-                    return Chip(
-                      label: Text(DateFormat('MMM yyyy').format(date)),
-                    );
-                  }).toList(),
-                ),
-              ],
               const SizedBox(height: 10),
               FilledButton(
                 onPressed: () {
                   final value = double.tryParse(amount.text);
                   if (billType == 'fixed') {
                     installments = int.tryParse(installmentsInput.text) ?? 0;
-                    remaining = int.tryParse(remainingInput.text) ?? -1;
                   }
                   if (title.text.trim().isEmpty ||
                       value == null ||
                       value <= 0 ||
-                      (billType == 'fixed' &&
-                          (installments < 1 ||
-                              remaining < 0 ||
-                              remaining > installments))) {
+                      (billType == 'fixed' && installments < 1)) {
                     return;
                   }
+                  final paidCount = bill?.paidMonths.length ?? 0;
+                  final calculatedRemaining = billType == 'recurring'
+                      ? 1
+                      : (installments - paidCount).clamp(0, installments);
                   if (bill == null) {
                     store.addBill(
                       Bill(
@@ -2229,7 +2676,7 @@ Future<void> showBillSheet(
                             : installments,
                         remainingInstallments: billType == 'recurring'
                             ? 1
-                            : remaining,
+                            : calculatedRemaining,
                         autoDeduct: true,
                         type: billType,
                         startMonth: startMonth,
@@ -2246,7 +2693,7 @@ Future<void> showBillSheet(
                           : installments
                       ..remainingInstallments = billType == 'recurring'
                           ? 1
-                          : remaining
+                          : calculatedRemaining
                       ..autoDeduct = true
                       ..type = billType
                       ..startMonth = startMonth;
