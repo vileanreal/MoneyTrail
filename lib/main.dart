@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
 
@@ -37,6 +38,9 @@ Future<void> main() async {
   await store.load();
   await NotificationService.instance.initialize();
   runApp(MoneyTracker(store: store));
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    unawaited(NotificationService.instance.sync(store.bills));
+  });
 }
 
 class MoneyTracker extends StatelessWidget {
@@ -384,6 +388,10 @@ class AppStore extends ChangeNotifier {
     if (value.type != 'recurring') value.remainingInstallments--;
     notifyListeners();
     await save();
+    await NotificationService.instance.schedule(
+      value,
+      requestExactPermission: false,
+    );
   }
 
   Future<void> setBillMonthPaid(Bill value, DateTime month, bool isPaid) async {
@@ -410,6 +418,10 @@ class AppStore extends ChangeNotifier {
     value.paid = value.isPaidThisMonth;
     notifyListeners();
     await save();
+    await NotificationService.instance.schedule(
+      value,
+      requestExactPermission: false,
+    );
   }
 
   Future<void> undoBillPayment(Bill value) async {
@@ -483,6 +495,7 @@ class NotificationService {
   NotificationService._();
   static final instance = NotificationService._();
   final plugin = FlutterLocalNotificationsPlugin();
+  bool _initialized = false;
 
   Future<void> initialize() async {
     tz.initializeTimeZones();
@@ -496,37 +509,92 @@ class NotificationService {
         iOS: DarwinInitializationSettings(),
       ),
     );
+    _initialized = true;
   }
 
-  Future<void> requestPermission() async {
-    await plugin
+  Future<AndroidScheduleMode> requestPermission({
+    bool requestExactPermission = true,
+  }) async {
+    final android = plugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
-        >()
-        ?.requestNotificationsPermission();
+        >();
+    await android?.requestNotificationsPermission();
     await plugin
         .resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin
         >()
         ?.requestPermissions(alert: true, badge: true, sound: true);
+
+    if (android == null) return AndroidScheduleMode.inexactAllowWhileIdle;
+    var exactAllowed = await android.canScheduleExactNotifications() ?? false;
+    if (!exactAllowed && requestExactPermission) {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool('exactAlarmPermissionPrompted', true);
+      await android.requestExactAlarmsPermission();
+      exactAllowed = await android.canScheduleExactNotifications() ?? false;
+    }
+    return exactAllowed
+        ? AndroidScheduleMode.exactAllowWhileIdle
+        : AndroidScheduleMode.inexactAllowWhileIdle;
   }
 
-  Future<void> schedule(Bill bill) async {
-    if (!bill.reminder) return;
-    await requestPermission();
+  Future<void> sync(Iterable<Bill> bills) async {
+    if (kIsWeb || !_initialized) return;
+    final storedBills = bills.toList(growable: false);
+    final activeIds = storedBills
+        .where((bill) => bill.reminder && !bill.isCompleted)
+        .map((bill) => bill.id)
+        .toSet();
+    final pending = await plugin.pendingNotificationRequests();
+    for (final notification in pending) {
+      if (!activeIds.contains(notification.id)) {
+        await cancel(notification.id);
+      }
+    }
+    if (activeIds.isEmpty) return;
+    final preferences = await SharedPreferences.getInstance();
+    final shouldPromptForExactAlarm =
+        !(preferences.getBool('exactAlarmPermissionPrompted') ?? false);
+    final scheduleMode = await requestPermission(
+      requestExactPermission: shouldPromptForExactAlarm,
+    );
+    for (final bill in storedBills) {
+      await _schedule(bill, scheduleMode);
+    }
+  }
+
+  Future<void> schedule(Bill bill, {bool requestExactPermission = true}) async {
+    if (kIsWeb || !_initialized) return;
+    await cancel(bill.id);
+    if (!bill.reminder || bill.isCompleted) return;
+    final scheduleMode = await requestPermission(
+      requestExactPermission: requestExactPermission,
+    );
+    await _schedule(bill, scheduleMode);
+  }
+
+  Future<void> _schedule(Bill bill, AndroidScheduleMode scheduleMode) async {
+    if (!bill.reminder || bill.isCompleted) return;
     final now = tz.TZDateTime.now(tz.local);
+    final startsLater = DateTime(
+      bill.startMonth.year,
+      bill.startMonth.month,
+    ).isAfter(DateTime(now.year, now.month));
+    final firstYear = startsLater ? bill.startMonth.year : now.year;
+    final firstMonth = startsLater ? bill.startMonth.month : now.month;
     var when = tz.TZDateTime(
       tz.local,
-      now.year,
-      now.month,
+      firstYear,
+      firstMonth,
       bill.dueDay.clamp(1, 28),
       9,
     );
-    if (when.isBefore(now)) {
+    if (!when.isAfter(now) || (!startsLater && bill.isPaidThisMonth)) {
       when = tz.TZDateTime(
         tz.local,
-        now.year,
-        now.month + 1,
+        firstYear,
+        firstMonth + 1,
         bill.dueDay.clamp(1, 28),
         9,
       );
@@ -546,12 +614,15 @@ class NotificationService {
         ),
         iOS: DarwinNotificationDetails(),
       ),
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      androidScheduleMode: scheduleMode,
       matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
     );
   }
 
-  Future<void> cancel(int id) => plugin.cancel(id: id);
+  Future<void> cancel(int id) async {
+    if (kIsWeb || !_initialized) return;
+    await plugin.cancel(id: id);
+  }
 }
 
 String money(double value) {

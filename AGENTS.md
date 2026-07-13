@@ -94,6 +94,9 @@ is the user-triggered GitHub Release update checker.
   default. Records can be reordered within their type/status group and order
   persists.
 - Local due-date notifications are scheduled on supported mobile platforms.
+  Android uses exact-while-idle alarms when the user grants Alarms & reminders
+  access, falls back to inexact idle-safe alarms otherwise, restores schedules
+  at app startup, and reschedules them after reboot or app replacement.
   Browser background notifications are not guaranteed after the browser closes.
 
 ### Savings
